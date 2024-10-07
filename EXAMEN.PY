@@ -2,6 +2,208 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 import numpy as np
 
+class MetodoSimplex:
+    def __init__(self, num_vars, num_restricciones, maximizar, coef_funcion_z, restricciones):
+        self.num_vars = num_vars
+        self.num_restricciones = num_restricciones
+        self.maximizar = maximizar
+        self.coef_funcion_z = coef_funcion_z
+        self.restricciones = restricciones
+        self.tableau = None
+        self.columna_pivote = None
+        self.fila_pivote = None
+
+    def inicializar_tabla(self):
+        num_filas = self.num_restricciones + 1
+        num_columnas = self.num_vars + self.num_restricciones + 1  # Variables + Holguras + RHS
+        self.tableau = np.zeros((num_filas, num_columnas))
+
+        # Llenar restricciones en la tabla
+        for i in range(self.num_restricciones):
+            self.tableau[i, :self.num_vars] = self.restricciones[i][:self.num_vars]
+            self.tableau[i, self.num_vars + i] = 1  # Variables de holgura
+            self.tableau[i, -1] = self.restricciones[i][-1]
+
+        # Llenar la función objetivo
+        if self.maximizar:
+            self.tableau[-1, :self.num_vars] = -1 * np.array(self.coef_funcion_z)
+        else:
+            self.tableau[-1, :self.num_vars] = np.array(self.coef_funcion_z)
+
+    def encontrar_columna_pivote(self):
+        z_fila = self.tableau[-1, :-1]
+        return np.argmin(z_fila) if self.maximizar else np.argmax(z_fila)
+
+    def encontrar_fila_pivote(self, col_pivote):
+        razones = []
+        for i in range(self.num_restricciones):
+            if self.tableau[i, col_pivote] > 0:
+                razones.append(self.tableau[i, -1] / self.tableau[i, col_pivote])
+            else:
+                razones.append(np.inf)
+        return np.argmin(razones)
+
+    def hacer_pivoteo(self, fila_pivote, col_pivote):
+        pivote = self.tableau[fila_pivote, col_pivote]
+        self.tableau[fila_pivote, :] /= pivote
+        for i in range(len(self.tableau)):
+            if i != fila_pivote:
+                factor = self.tableau[i, col_pivote]
+                self.tableau[i, :] -= factor * self.tableau[fila_pivote, :]
+
+    def resolver(self):
+        self.inicializar_tabla()
+        iteracion = 0
+        tabla_resultados = [("Tabla inicial:", self.tableau.copy())]
+        
+        while True:
+            self.columna_pivote = self.encontrar_columna_pivote()
+            if (self.maximizar and self.tableau[-1, self.columna_pivote] >= 0) or (not self.maximizar and self.tableau[-1, self.columna_pivote] <= 0):
+                break
+            self.fila_pivote = self.encontrar_fila_pivote(self.columna_pivote)
+            if self.fila_pivote == np.inf:
+                return None
+            
+            self.hacer_pivoteo(self.fila_pivote, self.columna_pivote)
+            tabla_resultados.append((f"Iteración {iteracion}: Columna pivote: {self.columna_pivote}, Fila pivote: {self.fila_pivote}", self.tableau.copy()))
+            iteracion += 1
+
+        return tabla_resultados
+
+    def resultado_final(self):
+        valor_optimo_z = self.tableau[-1, -1]
+        variables_basicas = self.tableau[:-1, -1]  # Obtiene el RHS de las restricciones
+
+        return self.columna_pivote, self.fila_pivote, valor_optimo_z, variables_basicas
+
+class MetodoM(MetodoSimplex):
+    def inicializar_tabla(self):
+        num_filas = self.num_restricciones + 1
+        num_columnas = self.num_vars + self.num_restricciones + 1  # Variables + Holguras + RHS
+        self.tableau = np.zeros((num_filas, num_columnas))
+
+        M = 1e6  # Valor de penalización M
+        self.mensajes = []  # Lista para almacenar mensajes
+
+        for i in range(self.num_restricciones):
+            self.tableau[i, :self.num_vars] = self.restricciones[i][:self.num_vars]
+            if self.restricciones[i][-2] in ['>=', '=']:  # Si es >= o =, se agrega variable artificial
+                self.tableau[i, self.num_vars + i] = 1  # Variable artificial
+                self.mensajes.append(f"Se agregó una variable artificial en la restricción {i + 1}.")
+            else:
+                self.tableau[i, self.num_vars + i] = 1  # Variable de holgura
+            self.tableau[i, -1] = self.restricciones[i][-1]
+
+        # Llenar la función objetivo con penalización M si es maximización o minimización
+        self.mensajes.append("Método: Método de la M")
+        if self.maximizar:
+            self.tableau[-1, :self.num_vars] = -1 * np.array(self.coef_funcion_z)
+        else:
+            self.tableau[-1, :self.num_vars] = np.array(self.coef_funcion_z)
+
+        for i in range(self.num_restricciones):
+            if self.restricciones[i][-2] in ['>=', '=']:
+                self.mensajes.append(f"Realizando operaciones con la penalización M en la función objetivo debido a la restricción {i + 1}:")
+                self.mensajes.append(f"Función objetivo original: Z = {self.coef_funcion_z}")
+                self.mensajes.append(f"-M({self.restricciones[i][:self.num_vars]} + RHS = {self.restricciones[i][-1]})")
+                self.tableau[-1, :] -= M * self.tableau[i, :]
+                self.mensajes.append(f"Función objetivo modificada: {self.tableau[-1, :self.num_vars]}")
+
+    # Método para obtener los mensajes
+    def obtener_mensajes(self):
+        return self.mensajes
+
+class DosFases(MetodoSimplex):
+    def __init__(self, num_vars, num_restricciones, maximizar, coef_funcion_z, restricciones):
+        super().__init__(num_vars, num_restricciones, maximizar, coef_funcion_z, restricciones)
+        self.mensajes = []
+
+    def inicializar_tabla_fase1(self):
+        # Determinar el número de variables artificiales necesarias
+        num_artificiales = sum(1 for r in self.restricciones if r[-2] in ['>=', '='])
+
+        # Crear tabla aumentada para Fase 1
+        num_columnas = self.num_vars + self.num_restricciones + num_artificiales + 1
+        self.tableau = np.zeros((self.num_restricciones + 1, num_columnas))
+
+        # Llenar las restricciones
+        art_idx = self.num_vars + self.num_restricciones
+        for i in range(self.num_restricciones):
+            self.tableau[i, :self.num_vars] = self.restricciones[i][:self.num_vars]
+            if self.restricciones[i][-2] == '<=':
+                self.tableau[i, self.num_vars + i] = 1  # Variable de holgura
+            elif self.restricciones[i][-2] == '>=':
+                self.tableau[i, self.num_vars + i] = -1  # Variable de exceso
+                self.tableau[i, art_idx] = 1  # Variable artificial
+                art_idx += 1
+            elif self.restricciones[i][-2] == '=':
+                self.tableau[i, art_idx] = 1  # Solo variable artificial
+                art_idx += 1
+            self.tableau[i, -1] = self.restricciones[i][-1]
+
+        # Función objetivo de Fase 1 (minimizar suma de variables artificiales)
+        self.tableau[-1, art_idx-num_artificiales:art_idx] = 1
+
+        # Ajustar la fila Z para eliminar las variables artificiales
+        for i in range(self.num_restricciones):
+            if self.restricciones[i][-2] in ['>=', '=']:
+                self.tableau[-1, :] -= self.tableau[i, :]
+
+    def resolver(self):
+        # Fase 1
+        self.mensajes.append("Iniciando Fase 1: Encontrar solución factible básica inicial")
+        self.inicializar_tabla_fase1()
+        resultados_fase1 = [("Tabla inicial Fase 1:", self.tableau.copy())]
+
+        while True:
+            col_pivote = self.encontrar_columna_pivote()
+            if self.tableau[-1, col_pivote] >= 0:
+                break
+
+            fila_pivote = self.encontrar_fila_pivote(col_pivote)
+            if fila_pivote == np.inf:
+                self.mensajes.append("El problema no tiene solución factible")
+                return resultados_fase1
+
+            self.hacer_pivoteo(fila_pivote, col_pivote)
+            resultados_fase1.append((f"Iteración Fase 1 - Columna pivote: {col_pivote}, Fila pivote: {fila_pivote}",
+                                   self.tableau.copy()))
+
+        # Verificar factibilidad
+        if abs(self.tableau[-1, -1]) > 1e-10:
+            self.mensajes.append("El problema original no tiene solución factible")
+            return resultados_fase1
+
+        # Fase 2
+        self.mensajes.append("\nIniciando Fase 2: Optimizar función objetivo original")
+        # Preparar tabla para Fase 2
+        tabla_fase2 = self.tableau[:-1, :self.num_vars + self.num_restricciones + 1]
+        nueva_z = np.zeros(self.num_vars + self.num_restricciones + 1)
+        nueva_z[:self.num_vars] = self.coef_funcion_z if not self.maximizar else [-x for x in self.coef_funcion_z]
+        self.tableau = np.vstack([tabla_fase2, nueva_z])
+
+        resultados_fase2 = [("Tabla inicial Fase 2:", self.tableau.copy())]
+
+        while True:
+            col_pivote = self.encontrar_columna_pivote()
+            if (self.maximizar and self.tableau[-1, col_pivote] >= 0) or \
+               (not self.maximizar and self.tableau[-1, col_pivote] <= 0):
+                break
+
+            fila_pivote = self.encontrar_fila_pivote(col_pivote)
+            if fila_pivote == np.inf:
+                self.mensajes.append("El problema no tiene solución acotada")
+                return resultados_fase1 + resultados_fase2
+
+            self.hacer_pivoteo(fila_pivote, col_pivote)
+            resultados_fase2.append((f"Iteración Fase 2 - Columna pivote: {col_pivote}, Fila pivote: {fila_pivote}",
+                                   self.tableau.copy()))
+
+        return resultados_fase1 + resultados_fase2
+
+    def obtener_mensajes(self):
+        return self.mensajes
+
 class OptimizacionLinealGUI:
     def __init__(self, master):
         self.master = master
@@ -76,262 +278,87 @@ class OptimizacionLinealGUI:
             self.Z_entries.append(entry)
             ttk.Label(self.frame_campos, text=f"x{i+1}").grid(row=2, column=i)
 
+        ttk.Label(self.frame_campos, text="Restricciones:").grid(row=3, column=0, columnspan=num_vars)
         self.restricciones_entries = []
         self.tipos_restriccion = []
+
         for i in range(num_rest):
             row_entries = []
-            ttk.Label(self.frame_campos, text=f"Restricción {i+1}:").grid(row=3+i*2, column=0, columnspan=num_vars)
+            ttk.Label(self.frame_campos, text=f"Restricción {i + 1}:").grid(row=4 + i * 2, column=0, columnspan=num_vars)
             for j in range(num_vars):
                 entry = ttk.Entry(self.frame_campos, width=5)
-                entry.grid(row=4+i*2, column=j)
+                entry.grid(row=4 + i * 2, column=j)
                 row_entries.append(entry)
-            
-            tipo_var = tk.StringVar(value="<=")
-            tipo_menu = ttk.OptionMenu(self.frame_campos, tipo_var, "<=", "<=", ">=", "=")
-            tipo_menu.grid(row=4+i*2, column=num_vars)
-            self.tipos_restriccion.append(tipo_var)
-            
-            valor_derecha = ttk.Entry(self.frame_campos, width=5)
-            valor_derecha.grid(row=4+i*2, column=num_vars+1)
-            row_entries.append(valor_derecha)
-            
+                ttk.Label(self.frame_campos, text=f"x{j + 1}").grid(row=5 + i * 2, column=j)
+
+            tipo_entry = ttk.Combobox(self.frame_campos, values=['<=', '>=', '='], state='readonly', width=5)
+            tipo_entry.grid(row=4 + i * 2, column=num_vars)
+            tipo_entry.set("<=")
+            self.tipos_restriccion.append(tipo_entry)
+
+            rhs_entry = ttk.Entry(self.frame_campos, width=5)
+            rhs_entry.grid(row=4 + i * 2, column=num_vars + 1)
+            row_entries.append(rhs_entry)
+
             self.restricciones_entries.append(row_entries)
 
     def resolver(self):
         try:
-            Z = np.array([float(entry.get()) for entry in self.Z_entries])
+            num_vars = int(self.num_vars.get())
+            num_rest = int(self.num_rest.get())
+
+            coef_funcion_z = [float(entry.get()) for entry in self.Z_entries]
             restricciones = []
-            tipos_restriccion = []
-            for i, row in enumerate(self.restricciones_entries):
-                restriccion = [float(entry.get()) for entry in row[:-1]]
-                valor_derecha = float(row[-1].get())
-                tipo = self.tipos_restriccion[i].get()
-                tipos_restriccion.append(tipo)
+            for row_entries, tipo_entry in zip(self.restricciones_entries, self.tipos_restriccion):
+                restriccion = [float(entry.get()) for entry in row_entries]
+                restriccion.append(tipo_entry.get())  # Añade el tipo de restricción como string
+                restriccion.append(float(row_entries[-1].get()))  # Añade el RHS como float
+                restricciones.append(restriccion)
 
-                if tipo == '>=':
-                    restriccion = [-x for x in restriccion]
-                    valor_derecha = -valor_derecha
-                elif tipo == '=':
-                    restriccion += [0]  # Agregar variable de holgura
-                restricciones.append(restriccion + [valor_derecha])
+            maximizar = True if self.tipo_var.get() == "max" else False
 
-            restricciones = np.array(restricciones)
-
-            # Cambiar signo de Z si es un problema de minimización
-            if self.tipo_var.get() == 'min':
-                Z = -Z  # Si es minimización, invertimos Z
-
-            resultado = ""
-            if self.metodo == "Simplex":
-                resultado = self.metodo_simplex(Z, restricciones)
-            elif self.metodo == "M":
-                resultado = self.metodo_m(Z, restricciones, tipos_restriccion)
+            if self.metodo == "M":
+                optimizacion = MetodoM(num_vars, num_rest, maximizar, coef_funcion_z, restricciones)
             elif self.metodo == "Dos Fases":
-                resultado = self.metodo_dos_fases(Z, restricciones, tipos_restriccion)
-
-            self.resultado_text.delete('1.0', tk.END)
-            self.resultado_text.insert(tk.END, resultado)
-            self.notebook.select(2)  # Cambiar a la pestaña de resultados
-        except ValueError:
-            messagebox.showerror("Error", "Por favor, asegúrese de que todos los campos estén llenos con números válidos.")
-
-    def metodo_simplex(self, Z, restricciones):
-        resultado = "Método Simplex\n\n"
-        
-        num_variables = len(Z)
-        num_restricciones = len(restricciones)
-        
-        # Agregar variables de holgura
-        Z_extendida = np.hstack([Z, np.zeros(num_restricciones), 0])
-        A_extendida = np.hstack([restricciones[:, :-1], np.eye(num_restricciones), restricciones[:, -1].reshape(-1, 1)])
-        
-        # Crear tabla inicial
-        tabla_simplex = np.vstack([A_extendida, Z_extendida])
-
-        iteracion = 0
-        while True:
-            resultado += f"Iteración {iteracion}\n"
-            resultado += str(tabla_simplex) + "\n\n"
-            
-            columna_pivote = self.encontrar_columna_pivote(tabla_simplex[-1])
-            if columna_pivote is None:
-                resultado += "Solución óptima alcanzada\n"
-                break
-            
-            fila_pivote = self.encontrar_fila_pivote(tabla_simplex[:-1], columna_pivote)
-            if fila_pivote is None:
-                resultado += "El problema no tiene solución factible\n"
-                return resultado
-            
-            tabla_simplex = self.actualizar_tabla_simplex(tabla_simplex, fila_pivote, columna_pivote)
-            iteracion += 1
-        
-        resultado += "Resultado final:\n"
-        resultado += str(tabla_simplex) + "\n"
-        resultado += f"Valor óptimo de Z: {-tabla_simplex[-1, -1]}\n"  # Cambiar signo si es minimización
-        variables = tabla_simplex[:-1, -1]
-        resultado += f"Valores de las variables básicas: {variables}\n"
-        
-        return resultado
-
-    def metodo_m(self, Z, restricciones, tipos_restriccion):
-        resultado = "Método de la M\n\n"
-        
-        num_variables = len(Z)
-        num_restricciones = len(restricciones)
-        
-        restricciones_artificiales = [tipo == '=' or tipo == '>=' for tipo in tipos_restriccion]
-        num_artificiales = np.sum(restricciones_artificiales)
-        
-        M = 1e6
-        Z_extendida = np.hstack([Z, np.zeros(num_restricciones), np.zeros(num_artificiales), 0])
-        A_extendida = np.hstack([
-            restricciones[:, :-1],
-            np.eye(num_restricciones),
-            np.zeros((num_restricciones, num_artificiales)),
-            restricciones[:, -1].reshape(-1, 1)
-        ])
-        
-        artificial_index = 0
-        for i in range(num_restricciones):
-            if restricciones_artificiales[i]:
-                A_extendida[i, num_variables + num_restricciones + artificial_index] = 1
-                Z_extendida[num_variables + num_restricciones + artificial_index] = M
-                artificial_index += 1
-        
-        costo_reducido = np.sum(A_extendida[restricciones_artificiales], axis=0) * -1
-        tabla_simplex = np.vstack([A_extendida, Z_extendida])
-        
-        iteracion = 0
-        while True:
-            resultado += f"Iteración {iteracion}\n"
-            resultado += str(tabla_simplex) + "\n\n"
-            
-            columna_pivote = self.encontrar_columna_pivote(tabla_simplex[-1])
-            if columna_pivote is None:
-                resultado += "Solución óptima alcanzada\n"
-                break
-            
-            fila_pivote = self.encontrar_fila_pivote(tabla_simplex[:-1], columna_pivote)
-            if fila_pivote is None:
-                resultado += "El problema no tiene solución factible\n"
-                return resultado
-            
-            tabla_simplex = self.actualizar_tabla_simplex(tabla_simplex, fila_pivote, columna_pivote)
-            iteracion += 1
-        
-        resultado += "Resultado final:\n"
-        resultado += str(tabla_simplex) + "\n"
-        resultado += f"Valor óptimo de Z: {tabla_simplex[-1, -1]}\n"
-        variables = tabla_simplex[:-1, -1]
-        resultado += f"Valores de las variables básicas: {variables}\n"
-        
-        return resultado
-
-    def metodo_dos_fases(self, Z, restricciones, tipos_restriccion):
-        resultado = "Método de las Dos Fases\n\n"
-        
-        num_variables = len(Z)
-        num_restricciones = len(restricciones)
-        
-        # Fase 1: Minimizar la suma de las variables artificiales
-        Z_fase1 = np.zeros(num_variables + num_restricciones + 1)
-        Z_fase1[-1] = 1  # La función objetivo es minimizar la suma de las variables artificiales
-        A_extendida = np.hstack([restricciones[:, :-1], np.eye(num_restricciones), restricciones[:, -1].reshape(-1, 1)])
-        
-        tabla_simplex = np.vstack([A_extendida, Z_fase1])
-        
-        iteracion = 0
-        while True:
-            resultado += f"Iteración {iteracion}\n"
-            resultado += str(tabla_simplex) + "\n\n"
-            
-            columna_pivote = self.encontrar_columna_pivote(tabla_simplex[-1])
-            if columna_pivote is None:
-                resultado += "Solución óptima alcanzada\n"
-                break
-            
-            fila_pivote = self.encontrar_fila_pivote(tabla_simplex[:-1], columna_pivote)
-            if fila_pivote is None:
-                resultado += "El problema no tiene solución factible\n"
-                return resultado
-            
-            tabla_simplex = self.actualizar_tabla_simplex(tabla_simplex, fila_pivote, columna_pivote)
-            iteracion += 1
-
-        resultado += "Resultado de la Fase 1:\n"
-        resultado += str(tabla_simplex) + "\n"
-
-        # Eliminar variables artificiales de la función objetivo
-        # Verificar que no queden variables artificiales en la solución
-        if np.any(tabla_simplex[:-1, -1] < 0):
-            resultado += "El problema no tiene solución factible\n"
-            return resultado
-
-        # Fase 2: Maximizar la función objetivo original
-        Z_extendida = np.hstack([Z, np.zeros(num_restricciones), 0])
-        tabla_simplex = np.vstack([A_extendida, Z_extendida])
-
-        iteracion = 0
-        while True:
-            resultado += f"Iteración {iteracion}\n"
-            resultado += str(tabla_simplex) + "\n\n"
-            
-            columna_pivote = self.encontrar_columna_pivote(tabla_simplex[-1])
-            if columna_pivote is None:
-                resultado += "Solución óptima alcanzada\n"
-                break
-            
-            fila_pivote = self.encontrar_fila_pivote(tabla_simplex[:-1], columna_pivote)
-            if fila_pivote is None:
-                resultado += "El problema no tiene solución factible\n"
-                return resultado
-            
-            tabla_simplex = self.actualizar_tabla_simplex(tabla_simplex, fila_pivote, columna_pivote)
-            iteracion += 1
-        
-        resultado += "Resultado final:\n"
-        resultado += str(tabla_simplex) + "\n"
-        resultado += f"Valor óptimo de Z: {tabla_simplex[-1, -1]}\n"
-        variables = tabla_simplex[:-1, -1]
-        resultado += f"Valores de las variables básicas: {variables}\n"
-        
-        return resultado
-
-    def encontrar_columna_pivote(self, fila):
-        """Encuentra la columna pivote usando la regla de la primera fila negativa."""
-        for i, valor in enumerate(fila[:-1]):
-            if valor < 0:  # Para maximizar buscamos el menor valor
-                return i
-        return None
-
-    def encontrar_fila_pivote(self, tabla, columna):
-        """Encuentra la fila pivote usando la regla del cociente mínimo."""
-        cocientes = []
-        for i in range(len(tabla)):
-            if tabla[i, columna] > 0:  # Solo consideramos filas con coeficientes positivos
-                cocientes.append(tabla[i, -1] / tabla[i, columna])
+                optimizacion = DosFases(num_vars, num_rest, maximizar, coef_funcion_z, restricciones)
             else:
-                cocientes.append(np.inf)
-        
-        fila_pivote = np.argmin(cocientes)
-        if cocientes[fila_pivote] == np.inf:
-            return None  # No hay fila pivote válida
-        
-        return fila_pivote
+                optimizacion = MetodoSimplex(num_vars, num_rest, maximizar, coef_funcion_z, restricciones)
 
-    def actualizar_tabla_simplex(self, tabla, fila_pivote, columna_pivote):
-        """Actualiza la tabla simplex usando la fila y columna pivote."""
-        tabla_pivote = tabla[fila_pivote] / tabla[fila_pivote, columna_pivote]
-        tabla = np.copy(tabla)
-        tabla[fila_pivote] = tabla_pivote
-        
-        for i in range(len(tabla)):
-            if i != fila_pivote:
-                tabla[i] -= tabla[i, columna_pivote] * tabla_pivote
-        return tabla
+            resultados = optimizacion.resolver()
+            if resultados is None:
+                self.resultado_text.delete(1.0, tk.END)
+                self.resultado_text.insert(tk.END, "El problema no tiene solución.\n")
+                return
+            
+            # Obtener los mensajes desde el método M
+            mensajes = []
+            if self.metodo == ["M", "Dos Fases"]:
+                mensajes = optimizacion.obtener_mensajes()
 
-if __name__ == "__main__":
-    root = tk.Tk()
-    app = OptimizacionLinealGUI(root)
-    root.mainloop()
+            self.mostrar_resultado(resultados, optimizacion.resultado_final(), mensajes)
+
+        except Exception as e:
+            messagebox.showerror("Error", str(e))
+
+    def mostrar_resultado(self, resultados, final_results, mensajes):
+        self.resultado_text.delete(1.0, tk.END)
+
+        for descripcion, tabla in resultados:
+            self.resultado_text.insert(tk.END, descripcion + "\n")
+            for fila in tabla:
+                self.resultado_text.insert(tk.END, " | ".join(f"{val:10.2f}" for val in fila) + "\n")
+            self.resultado_text.insert(tk.END, "\n")
+
+        # Mostrar los mensajes relacionados con el Método de la M
+        for mensaje in mensajes:
+            self.resultado_text.insert(tk.END, mensaje + "\n")
+
+        columna_pivote, fila_pivote, valor_optimo_z, variables_basicas = final_results
+        self.resultado_text.insert(tk.END, f"Columna pivote final: {columna_pivote}\n")
+        self.resultado_text.insert(tk.END, f"Fila pivote final: {fila_pivote}\n")
+        self.resultado_text.insert(tk.END, f"Valor óptimo de Z: {valor_optimo_z:.2f}\n")
+        self.resultado_text.insert(tk.END, f"Valores de las variables básicas: {variables_basicas}\n")
+
+root = tk.Tk()
+app = OptimizacionLinealGUI(root)
+root.mainloop()
